@@ -1,0 +1,25 @@
+import { CheckCircle2, ExternalLink, Inbox, UserRound } from 'lucide-react';
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { DemoNotice, PageHeader } from '../components/platform/PageHeader';
+import { RiskPill } from '../components/platform/StatusPill';
+import { demoReviews } from '../data/demo/reviews';
+import { ReviewDrawer } from '../components/ReviewDrawer';
+import { useMockApi } from '../lib/config';
+import { BackendReviews } from './BackendReviews';
+export function Reviews() {
+    if (!useMockApi)
+        return <BackendReviews />;
+    return <DemoReviews />;
+}
+function DemoReviews() {
+    const [reviews, setReviews] = useState(demoReviews);
+    const [selected, setSelected] = useState(null);
+    function resolve(eventId, action) {
+        setReviews((items) => items.map((item) => item.event.id === eventId
+            ? { ...item, action, status: 'Resolved', event: { ...item.event, action, reviewed: true } }
+            : item));
+        setSelected(null);
+    }
+    return <div className="mx-auto max-w-[1600px]"><PageHeader eyebrow="Human-in-the-loop operations" title="Review queue" description="Prioritize demo moderation events and open the existing evidence drawer for a closer review."/><DemoNotice>Demo review tasks · reviewers and decisions are not persisted</DemoNotice><div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3"><div className="rounded-xl border border-line bg-surface p-4 shadow-card"><p className="text-xs text-ink-muted">Pending</p><p className="mt-2 font-mono text-2xl font-semibold text-moderate">{reviews.filter((review) => review.status === 'Pending').length}</p></div><div className="rounded-xl border border-line bg-surface p-4 shadow-card"><p className="text-xs text-ink-muted">In review</p><p className="mt-2 font-mono text-2xl font-semibold text-accent">{reviews.filter((review) => review.status === 'In review').length}</p></div><div className="rounded-xl border border-line bg-surface p-4 shadow-card"><p className="text-xs text-ink-muted">Resolved</p><p className="mt-2 font-mono text-2xl font-semibold text-low">{reviews.filter((review) => review.status === 'Resolved').length}</p></div></div><div className="overflow-hidden rounded-xl border border-line bg-surface shadow-card"><div className="flex items-center justify-between border-b border-line px-4 py-3.5"><div className="flex items-center gap-2"><Inbox className="h-4 w-4 text-accent" aria-hidden="true"/><p className="text-sm font-semibold text-ink">Flagged content</p></div><Link to="/moderation" className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent hover:text-accent/80">Live workspace <ExternalLink className="h-3.5 w-3.5" aria-hidden="true"/></Link></div><div className="overflow-x-auto"><table className="w-full min-w-[980px] text-left"><thead className="bg-panel"><tr className="border-b border-line text-[10px] uppercase tracking-wider text-ink-faint"><th className="px-4 py-3 font-semibold">Severity</th><th className="px-3 py-3 font-semibold">Risk score</th><th className="px-3 py-3 font-semibold">Modality</th><th className="px-3 py-3 font-semibold">Threat / category</th><th className="px-3 py-3 font-semibold">Timestamp</th><th className="px-3 py-3 font-semibold">Status</th><th className="px-3 py-3 font-semibold">Reviewer</th><th className="px-3 py-3 font-semibold">Action</th><th className="px-3 py-3 text-right font-semibold">Open</th></tr></thead><tbody>{reviews.map((review) => <tr key={review.id} className="border-b border-line-soft last:border-0 hover:bg-panel"><td className="px-4 py-3"><RiskPill level={review.severity}/></td><td className="px-3 py-3 font-mono text-xs font-semibold text-ink">{review.score.toFixed(2)}</td><td className="px-3 py-3 capitalize text-xs text-ink-muted">{review.modality}</td><td className="px-3 py-3 text-xs text-ink">{review.threat}</td><td className="px-3 py-3 font-mono text-xs text-ink-muted">{review.timestamp}</td><td className="px-3 py-3"><span className="text-xs text-ink-muted">{review.status}</span></td><td className="px-3 py-3"><span className="inline-flex items-center gap-1.5 text-xs text-ink-muted"><UserRound className="h-3.5 w-3.5 text-ink-faint" aria-hidden="true"/>{review.reviewer}</span></td><td className="px-3 py-3 text-xs capitalize text-ink-muted">{review.action}</td><td className="px-3 py-3 text-right"><button type="button" onClick={() => setSelected(review)} className="rounded-md px-2.5 py-1.5 text-xs font-semibold text-accent ring-1 ring-inset ring-accent/25 hover:bg-accent/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent">{review.status === 'Resolved' ? 'View' : 'Review'}</button></td></tr>)}</tbody></table></div></div><div className="mt-4 flex items-center gap-2 text-[11px] text-ink-faint"><CheckCircle2 className="h-3.5 w-3.5 text-low" aria-hidden="true"/>Open an item to use the same evidence and resolution drawer as the moderation workspace.</div><ReviewDrawer event={selected?.event ?? null} onClose={() => setSelected(null)} onResolve={resolve}/></div>;
+}

@@ -1,0 +1,46 @@
+ModerAI Text Model Evaluation
+Dataset rows: 159571
+Training rows: 127656
+Testing rows: 31915
+Exact-match accuracy: 0.8841
+Micro F1-score: 0.6966
+Macro F1-score: 0.5825
+Hamming loss: 0.0275
+
+Split metadata:
+- Data source: ml-service/data/processed/cleaned_train.csv
+- Cleaning step: drop rows with missing comment_text, convert comment_text to str.strip(), drop empty strings, drop exact duplicate comments by comment_text
+- Train/test split: train_test_split(X, y, test_size=0.20, random_state=42)
+- Validation split: none (no dedicated validation set exists in this script)
+- Random seed: 42
+- Leakage checks: exact duplicate comment_text rows after cleaning = 0; train/test overlap on comment_text = 0
+- Model selection / threshold tuning on the test set: none; the script evaluates raw 0/1 predictions on the held-out test set only
+- Production threshold policy: configured separately in backend/config.js and applied in JS, not learned or optimized in this evaluation
+
+Production moderation thresholds (backend/config.js):
+- toxic: 0.72
+- severe_toxic: 0.82
+- obscene: 0.72
+- threat: 0.90
+- insult: 0.74
+- identity_hate: 0.82
+
+Per-label classification report:
+               precision    recall  f1-score   support
+
+        toxic     0.6572    0.8508    0.7416      3056
+ severe_toxic     0.3003    0.8131    0.4387       321
+      obscene     0.7166    0.8787    0.7894      1715
+       threat     0.2953    0.7703    0.4270        74
+       insult     0.5907    0.8693    0.7034      1614
+identity_hate     0.2737    0.7075    0.3947       294
+
+    micro avg     0.5885    0.8533    0.6966      7074
+    macro avg     0.4723    0.8149    0.5825      7074
+ weighted avg     0.6205    0.8533    0.7130      7074
+  samples avg     0.0635    0.0810    0.0683      7074
+
+Interpretation:
+- This is a valid held-out test baseline for the raw classifier outputs.
+- It is not a valid calibration/evaluation for production threshold selection because no validation split exists and no threshold sweep is recorded.
+- Weak F1 for identity_hate, threat, and severe_toxic is consistent with severe class imbalance and sparse positives in the dataset, especially threat (74 positive labels in test set) and identity_hate (294 positives in test set).

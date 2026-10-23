@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+joblib
+pandas
+scikit-learn
+numpy
+Pillow
+onnxruntime
+faster-whisper
+huggingface_hub

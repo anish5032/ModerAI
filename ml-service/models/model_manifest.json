@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-23",
+  "models": {
+    "text": {
+      "kind": "sklearn_pipeline",
+      "path": "models/text_toxicity_model.joblib",
+      "sha256": "0aa2420b5d91bc644cf7d928e5da5505c410993f426d86683b71b0e0179e831d",
+      "bytes": 5767754,
+      "labels": [
+        "toxic",
+        "severe_toxic",
+        "obscene",
+        "threat",
+        "insult",
+        "identity_hate"
+      ],
+      "thresholds": {
+        "toxic": 0.72,
+        "severe_toxic": 0.82,
+        "obscene": 0.72,
+        "threat": 0.9,
+        "insult": 0.74,
+        "identity_hate": 0.82
+      },
+      "input": "UTF-8 text, trimmed, 1 to 20000 characters",
+      "trainingLibrary": "scikit-learn 1.7.1",
+      "scoreType": "raw model score",
+      "source": "Locally trained TF-IDF + One-vs-Rest Logistic Regression. The training dataset is not included in this repository.",
+      "license": "Verify the source dataset and scikit-learn component licenses before redistribution.",
+      "metricsNote": "Historical report metrics have not been independently reproduced in this workspace."
+    },
+    "vision": {
+      "kind": "onnx",
+      "path": "models/vision/onnx/image-safety-classifier-xs.onnx",
+      "sha256": "8c28c49d9075f3ad15ebdc2961f02d5b3f99be944815b848b49c9f0e6f3fb689",
+      "bytes": 13137569,
+      "labels": [
+        "NSFL",
+        "NSFW",
+        "SFW"
+      ],
+      "input": "RGB, bilinear resize to 224x224, float32 pixel range 0-255, shape [batch, 3, 224, 224]",
+      "scoreType": "class probability (softmax included in the exported model)",
+      "source": "https://huggingface.co/OwenElliott/image-safety-classifier-xs",
+      "license": "MIT",
+      "metricsNote": "The model card reports 97.76% accuracy; this has not been independently reproduced.",
+      "limitations": "NSFL targets graphic gore and NSFW targets sexual/suggestive content. This is not a general violence classifier."
+    },
+    "audio": {
+      "kind": "onnx",
+      "path": "models/audio/yamnet.onnx",
+      "sha256": "d3835ffbbd4a1bb3e777f0ca217b5007907f5171dd5d17c4236b95b2af8f908e",
+      "bytes": 16093355,
+      "classMapPath": "models/audio/yamnet_class_map.csv",
+      "classMapSha256": "cdf24d193e196d9e95912a2667051ae203e92a2ba09449218ccb40ef787c6df2",
+      "classCount": 521,
+      "labels": "YAMNet AudioSet class map (521 classes)",
+      "input": "1-D float32 mono waveform at 16000 Hz",
+      "outputs": [
+        "frame class scores [frames, 521]",
+        "embeddings [frames, 1024]",
+        "mel spectrogram [mel, 64]"
+      ],
+      "scoreType": "YAMNet class score (not calibrated; not an event probability)",
+      "source": "https://huggingface.co/audiomagic/yamnet-onnx",
+      "license": "Apache-2.0",
+      "frameHopSeconds": 0.48,
+      "frameWindowSeconds": 0.96,
+      "maxAnalyzedSeconds": 600,
+      "defaultMinConfidence": 0.3,
+      "severityWeights": {
+        "low": 0.35,
+        "moderate": 0.6,
+        "high": 0.8,
+        "critical": 0.95
+      },
+      "policyCategories": [
+        "explosion",
+        "distress",
+        "glass_break",
+        "fire",
+        "alarm"
+      ],
+      "limitations": "No labeled evaluation set is included. Scores and policy thresholds are heuristic and must be validated for the deployment domain."
+    }
+  }
+}

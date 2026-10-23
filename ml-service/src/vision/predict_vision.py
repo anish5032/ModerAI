@@ -52,7 +52,9 @@ def predict_image(image_path: str):
         "image": str(path),
         "predicted_class": predicted,
         "scores": scores,
-        "score_type": "model class score",
+        "label_order": LABELS,
+        "score_type": "class probability (softmax included in exported model)",
+        "preprocessing": "RGB, bilinear resize to 224x224, pixel range 0-255",
     }
 
 

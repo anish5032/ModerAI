@@ -3,6 +3,26 @@ import { fileURLToPath } from 'node:url';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
+function boundedNumber(raw, fallback, min, max) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+const audioEventMinConfidence = boundedNumber(
+  process.env.AUDIO_EVENT_MIN_CONFIDENCE,
+  0.3,
+  0.05,
+  0.99,
+);
+const audioEventMaxSeconds = boundedNumber(
+  process.env.AUDIO_EVENT_MAX_SECONDS,
+  600,
+  1,
+  3600,
+);
+
 export const defaultModerationThresholds = {
   toxic: 0.72,
   severe_toxic: 0.82,
@@ -15,6 +35,7 @@ export const defaultModerationThresholds = {
 export const config = {
   port: Number(process.env.PORT || 5000),
   mlServiceUrl: process.env.ML_SERVICE_URL || 'http://127.0.0.1:8000',
+  mlApiKey: process.env.ML_API_KEY || '',
   environment: process.env.ENV || 'development',
   jwtSecret: process.env.JWT_SECRET || 'dev-only-change-me-dev-only-change-me',
   jwtExpireMinutes: Number(process.env.JWT_EXPIRE_MINUTES || 720),
@@ -29,6 +50,8 @@ export const config = {
   allowRegistration: (process.env.ALLOW_REGISTRATION || 'true').toLowerCase() === 'true',
   chunkSeconds: Math.max(1, Number(process.env.CHUNK_SECONDS || 2)),
   defaultDurationSeconds: Number(process.env.DEFAULT_DURATION_SECONDS || 30),
+  audioEventMinConfidence,
+  audioEventMaxSeconds,
   moderationThresholds: {
     ...defaultModerationThresholds,
     ...(process.env.MODERATION_THRESHOLDS

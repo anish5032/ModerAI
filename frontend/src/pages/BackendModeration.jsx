@@ -10,6 +10,7 @@ import { ApiError } from "../lib/api";
 import { reviewApi, videoApi } from "../services/apiService";
 import {
   formatRiskScore,
+  getAudioRisk,
   getCombinedRisk,
   getEffectiveModerationDecision,
   getModalityStatus,
@@ -81,7 +82,7 @@ export function BackendModeration() {
         if (requestToken === activeRequestRef.current) setLoading(false);
       }
     },
-    [requestedId, searchParams, setSearchParams, syncUrlToSelection],
+    [requestedId, syncUrlToSelection],
   );
   useEffect(() => {
     void load(requestedId);
@@ -148,17 +149,18 @@ export function BackendModeration() {
   const partialMessage = getPartialAnalysisMessage(result);
   const textStatus = getModalityStatus(result, "text");
   const visualStatus = getModalityStatus(result, "visual");
+  const audioStatus = getModalityStatus(result, "audio");
+  const audioRisk = getAudioRisk(result);
+  const audioScore = formatRiskScore(audioRisk.score);
   const textScore = formatRiskScore(textRisk.score);
   const visualAnalysis = result?.visualAnalysis ?? {};
+  const audioAnalysis = result?.audioAnalysis ?? {};
   const visualModels = Array.isArray(visualAnalysis.models)
     ? visualAnalysis.models
     : [];
   const visualScoreTypes = Array.isArray(visualAnalysis.scoreTypes)
     ? visualAnalysis.scoreTypes
     : [];
-  const audioUnavailable =
-    Array.isArray(result?.unavailableModalities) &&
-    result.unavailableModalities.includes("audio");
   return (
     <div className="mx-auto max-w-[1800px] px-4 py-4 sm:px-6 sm:py-5">
       <PageHeader
@@ -183,8 +185,9 @@ export function BackendModeration() {
 
       <DemoNotice>
         Backend analysis uses Whisper transcription, the trained text toxicity
-        model, and sampled-frame image-safety classification. Non-speech
-        audio-event detection is not implemented.
+        model, sampled-frame image-safety classification, and YAMNet non-speech
+        audio-event detection. Audio events are review signals, not calibrated
+        proof of harmful content.
       </DemoNotice>
 
       {error && (
@@ -374,6 +377,16 @@ export function BackendModeration() {
                     Based on flagged visual frames.
                   </p>
                 )}
+                {combinedRisk.source === "audio" && (
+                  <p className="mt-1 text-[11px] text-ink-faint">
+                    Based on actionable non-speech audio events.
+                  </p>
+                )}
+                {combinedRisk.source === "multiple" && (
+                  <p className="mt-1 text-[11px] text-ink-faint">
+                    Based on more than one modality.
+                  </p>
+                )}
               </div>
 
               <div className="rounded-lg border border-line bg-panel p-3">
@@ -476,13 +489,42 @@ export function BackendModeration() {
                 <p className="text-xs text-ink-muted">
                   Non-speech audio analysis
                 </p>
-                <p className="mt-1 text-sm font-semibold text-ink">
-                  {audioUnavailable
-                    ? "Not implemented"
-                    : "Not independently evaluated"}
+                <p
+                  data-testid="audio-modality-status"
+                  className="mt-1 text-sm font-semibold text-ink"
+                >
+                  {audioStatus.label}
                 </p>
                 <p className="mt-1 text-xs text-ink-muted">
-                  Speech is transcribed and evaluated by the text model.
+                  Actionable events:{" "}
+                  {audioStatus.state === "completed"
+                    ? audioRisk.eventCount
+                    : "N/A"}
+                </p>
+                <p className="text-xs text-ink-muted">
+                  Informational only:{" "}
+                  {audioStatus.state === "completed"
+                    ? audioRisk.informationalCount
+                    : "N/A"}
+                </p>
+                {audioStatus.state === "completed" && audioScore && (
+                  <p className="mt-1 text-xs text-ink-muted">
+                    Peak audio risk score: {audioScore}
+                  </p>
+                )}
+                {audioAnalysis.model && (
+                  <p className="mt-1 break-words text-xs text-ink-muted">
+                    Model: {audioAnalysis.model}
+                  </p>
+                )}
+                {audioStatus.state === "failed" && audioAnalysis.error && (
+                  <p className="mt-1 break-words text-xs text-critical">
+                    {audioAnalysis.error}
+                  </p>
+                )}
+                <p className="mt-1 text-xs text-ink-faint">
+                  Speech is transcribed and evaluated separately by the text
+                  model.
                 </p>
               </div>
             </div>

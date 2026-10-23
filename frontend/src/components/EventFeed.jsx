@@ -35,7 +35,7 @@ export function EventFeed({ events, streaming, onReview }) {
                 <th scope="col" className="px-3 py-2.5 font-semibold">Trigger modality</th>
                 <th scope="col" className="px-3 py-2.5 font-semibold">Primary threat</th>
                 <th scope="col" className="px-3 py-2.5 font-semibold">Risk score</th>
-                <th scope="col" className="px-3 py-2.5 font-semibold">Action enforced</th>
+                <th scope="col" className="px-3 py-2.5 font-semibold">Recommended action</th>
                 <th scope="col" className="py-2.5 pl-3 pr-4 text-right font-semibold">Review</th>
               </tr>
             </thead>

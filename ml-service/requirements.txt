@@ -1,9 +1,11 @@
 fastapi
+python-multipart
 uvicorn[standard]
 pydantic
 joblib
 pandas
-scikit-learn
+# Must match the version used to train models/text_toxicity_model.joblib.
+scikit-learn==1.7.1
 numpy
 Pillow
 onnxruntime

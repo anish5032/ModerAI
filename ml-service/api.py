@@ -1,16 +1,23 @@
 
 from pathlib import Path
 from io import BytesIO
+import hmac
 import os
 import tempfile
+import time
+import uuid
 
 import joblib
 import onnxruntime as ort
 from PIL import Image
 from faster_whisper import WhisperModel
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
+from src import observability
+from src.audio import events as audio_events
 from src.vision.preprocessing import preprocess_image
 
 
@@ -38,11 +45,55 @@ ALLOWED_AUDIO_EXTENSIONS = {
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
+ML_API_KEY = os.environ.get("ML_API_KEY", "").strip()
 
 app = FastAPI(
     title="ModerAI ML Service",
-    version="1.2.0",
+    version="1.3.0",
 )
+
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    path = request.url.path
+    started = time.perf_counter()
+    status = 500
+    response = None
+
+    try:
+        if (
+            ML_API_KEY
+            and path != "/health"
+            and not hmac.compare_digest(
+                request.headers.get("x-api-key", "").encode("utf-8"),
+                ML_API_KEY.encode("utf-8"),
+            )
+        ):
+            status = 401
+            response = JSONResponse(
+                status_code=status,
+                content={"detail": "Invalid or missing ML API key."},
+            )
+            observability.log_error(path, PermissionError("unauthorized"), status)
+        else:
+            response = await call_next(request)
+            status = response.status_code
+    except Exception as exc:
+        observability.log_error(path, exc, 500)
+        raise
+    finally:
+        if path != "/health":
+            observability.log_request(
+                request.method,
+                path,
+                status,
+                (time.perf_counter() - started) * 1000,
+                request_id,
+            )
+
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 # --------------------------------------------------
@@ -106,7 +157,9 @@ def health():
         "text_model_type": "TF-IDF + One-vs-Rest Logistic Regression",
         "text_labels": labels,
         "vision_model_loaded": vision_session is not None,
-        "audio_model_loaded": whisper_model is not None,
+        "audio_transcription_loaded": whisper_model is not None,
+        "audio_event_model_loaded": audio_events.MODEL_PATH.is_file(),
+        "audio_event_model": audio_events.MODEL_ID,
     }
 
 
@@ -130,6 +183,18 @@ def predict_text(request: TextRequest):
         label: round(float(score), 6)
         for label, score in zip(labels, probabilities)
     }
+    top_category = max(scores, key=scores.get)
+
+    observability.log_prediction(
+        "/predict/text",
+        "TF-IDF + One-vs-Rest Logistic Regression",
+        scores=scores,
+        details={
+            "topCategory": top_category,
+            "maxScore": scores[top_category],
+            "characterCount": len(text),
+        },
+    )
 
     return {
         "text": text,
@@ -199,18 +264,120 @@ async def predict_vision(file: UploadFile = File(...)):
         label: round(float(score), 6)
         for label, score in zip(VISION_LABELS, output)
     }
+    predicted_class = max(scores, key=scores.get)
+
+    observability.log_prediction(
+        "/predict/vision",
+        "OwenElliott/image-safety-classifier-xs",
+        scores=scores,
+        flags=[predicted_class] if predicted_class != "SFW" else [],
+        details={"predictedClass": predicted_class},
+    )
 
     return {
         "filename": file.filename,
-        "predicted_class": max(scores, key=scores.get),
+        "predicted_class": predicted_class,
         "scores": scores,
         "model": "OwenElliott/image-safety-classifier-xs",
-        "score_type": "model class score",
+        "label_order": VISION_LABELS,
+        "score_type": "class probability (softmax included in exported model)",
+        "preprocessing": "RGB, bilinear resize to 224x224, pixel range 0-255",
         "note": (
-            "This model targets sexual/graphic image safety, "
-            "not general violence."
+            "NSFW targets sexual/suggestive content and NSFL targets "
+            "graphic gore; this is not a general violence classifier."
         ),
     }
+
+
+# --------------------------------------------------
+# Non-speech audio event analysis
+# --------------------------------------------------
+
+@app.post("/predict/audio/events")
+async def predict_audio_events(
+    file: UploadFile = File(...),
+    min_confidence: float = Query(
+        default=audio_events.DEFAULT_MIN_CONFIDENCE,
+        ge=0.05,
+        le=0.99,
+    ),
+):
+    filename = file.filename or "audio.wav"
+    extension = Path(filename).suffix.lower()
+
+    if extension not in ALLOWED_AUDIO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Supported formats: WAV, MP3, M4A, "
+                "OGG, FLAC, WEBM."
+            ),
+        )
+
+    content = await file.read()
+
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded audio is empty.",
+        )
+
+    if len(content) > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Audio must be 25 MB or smaller.",
+        )
+
+    temp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=extension,
+            delete=False,
+        ) as temp_file:
+            temp_file.write(content)
+            temp_path = temp_file.name
+
+        result = await run_in_threadpool(
+            audio_events.analyze_audio_file,
+            temp_path,
+            min_confidence,
+        )
+        result["filename"] = filename
+
+        observability.log_prediction(
+            "/predict/audio/events",
+            audio_events.MODEL_ID,
+            scores={
+                item["class"]: item["score"]
+                for item in result.get("topClasses", [])
+            },
+            flags=sorted(
+                {event["category"] for event in result.get("events", [])}
+            ),
+            details={
+                "riskLevel": result.get("riskLevel"),
+                "eventCount": len(result.get("events", [])),
+                "analyzedSeconds": result.get("analyzedSeconds"),
+                "truncated": result.get("truncated"),
+                "minConfidence": min_confidence,
+            },
+        )
+
+        return result
+
+    except audio_events.AudioEventError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Audio event analysis failed: {type(exc).__name__}",
+        ) from exc
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 # --------------------------------------------------
@@ -281,6 +448,22 @@ async def predict_audio(file: UploadFile = File(...)):
             label: round(float(score), 6)
             for label, score in zip(labels, probabilities)
         }
+        top_category = max(scores, key=scores.get)
+
+        observability.log_prediction(
+            "/predict/audio",
+            "Faster-Whisper tiny + text toxicity model",
+            scores=scores,
+            details={
+                "language": info.language,
+                "languageProbability": round(
+                    float(info.language_probability),
+                    4,
+                ),
+                "topCategory": top_category,
+                "maxScore": scores[top_category],
+            },
+        )
 
         return {
             "filename": filename,

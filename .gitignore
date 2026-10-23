@@ -57,6 +57,11 @@ ml-service/models/**/*.bin
 ml-service/models/**/*.safetensors
 ml-service/models/**/.cache/
 
+# Local prediction and drift logs
+ml-service/logs/
+**/logs/*.jsonl
+**/logs/*.md
+
 # Local test artifacts
 test-frame.jpg
 test-analysis-service.mjs

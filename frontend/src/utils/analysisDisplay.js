@@ -1,8 +1,9 @@
 const RISK_LEVELS = ['safe', 'low', 'moderate', 'high', 'critical'];
-const ANALYSIS_MODALITIES = ['text', 'visual'];
+const ANALYSIS_MODALITIES = ['text', 'visual', 'audio'];
 const MODALITY_LABELS = {
     text: 'Text',
-    visual: 'Visual'
+    visual: 'Visual',
+    audio: 'Audio'
 };
 const RISK_RANK = {
     safe: 0,
@@ -33,10 +34,15 @@ export function getUnavailableModalities(result = {}) {
     if (visualStatus === 'completed') unavailable.delete('visual');
     else if (visualStatus === 'failed') unavailable.add('visual');
 
+    const audioStatus = result.audioAnalysis?.status;
+    if (audioStatus === 'completed') unavailable.delete('audio');
+    else if (audioStatus === 'failed' || audioStatus === 'no_audio') unavailable.add('audio');
+
     const analyzed = arrayValue(result.modalitiesAnalyzed);
     if (analyzed) {
         if (!analyzed.includes('text') && !textStatus) unavailable.add('text');
         if (!analyzed.includes('visual') && !visualStatus) unavailable.add('visual');
+        if (analyzed.includes('audio')) unavailable.delete('audio');
     }
 
     return ANALYSIS_MODALITIES.filter((modality) => unavailable.has(modality));
@@ -44,17 +50,17 @@ export function getUnavailableModalities(result = {}) {
 
 export function isModalityAvailable(result = {}, modality) {
     result = result ?? {};
-    if (modality === 'audio') {
-        const unavailable = arrayValue(result?.unavailableModalities) ?? [];
-        return !unavailable.includes('audio');
-    }
     return !getUnavailableModalities(result).includes(modality);
 }
 
 export function isPartialAnalysis(result = {}) {
     result = result ?? {};
     if (result.partial === true || result.analysisStatus === 'partial') return true;
-    if (getUnavailableModalities(result).length > 0) return true;
+
+    const blockingUnavailable = getUnavailableModalities(result)
+        .filter((modality) => modality !== 'audio');
+    if (blockingUnavailable.length > 0) return true;
+    if (result.audioAnalysis?.status === 'failed') return true;
 
     const analyzed = arrayValue(result.modalitiesAnalyzed);
     if (analyzed && analyzed.length > 0) {
@@ -69,26 +75,47 @@ export function isPartialAnalysis(result = {}) {
 export function getTextChunkRisk(result = {}) {
     result = result ?? {};
     const available = isModalityAvailable(result, 'text');
-    const rawScore = result.riskScore;
+    const level = result.textAnalysis?.riskLevel ?? result.riskLevel;
+    const rawScore = result.modalityRiskScores?.text ?? result.riskScore;
     const numericScore = rawScore === null || rawScore === undefined || rawScore === ''
         ? NaN
         : Number(rawScore);
     return {
         available,
-        level: available ? normalizeRiskLevel(result.riskLevel) : null,
+        level: available ? normalizeRiskLevel(level) : null,
         score: available && Number.isFinite(numericScore) ? numericScore : null
+    };
+}
+
+export function getAudioRisk(result = {}) {
+    result = result ?? {};
+    const available = isModalityAvailable(result, 'audio');
+    const analysis = result.audioAnalysis ?? {};
+    const rawScore = result.modalityRiskScores?.audio ?? analysis.riskScore;
+    const numericScore = rawScore === null || rawScore === undefined || rawScore === ''
+        ? NaN
+        : Number(rawScore);
+    return {
+        available,
+        status: analysis.status ?? (available ? null : 'unavailable'),
+        level: available ? normalizeRiskLevel(analysis.actionableRiskLevel ?? analysis.riskLevel) : null,
+        score: available && Number.isFinite(numericScore) ? numericScore : null,
+        eventCount: Number(analysis.flaggedEventCount) || 0,
+        informationalCount: Number(analysis.informationalEventCount) || 0
     };
 }
 
 export function getCombinedRisk(result = {}) {
     result = result ?? {};
     const combinedLevel = normalizeRiskLevel(result.combinedRiskLevel);
-    if (combinedLevel) return { level: combinedLevel, source: 'combined' };
-
     const candidates = [];
     const textAvailable = isModalityAvailable(result, 'text');
-    const textLevel = textAvailable ? normalizeRiskLevel(result.riskLevel) : null;
-    if (textLevel) candidates.push(textLevel);
+    const textLevel = textAvailable
+        ? normalizeRiskLevel(result.textAnalysis?.riskLevel ?? result.riskLevel)
+        : null;
+    if (textLevel && textLevel !== 'safe') {
+        candidates.push({ level: textLevel, source: 'text' });
+    }
 
     const flaggedFrames = Number(result.visualAnalysis?.flaggedFrameCount);
     if (
@@ -96,18 +123,39 @@ export function getCombinedRisk(result = {}) {
         Number.isFinite(flaggedFrames) &&
         flaggedFrames > 0
     ) {
-        candidates.push('moderate');
+        candidates.push({
+            level: normalizeRiskLevel(result.visualAnalysis?.riskLevel) ?? 'moderate',
+            source: 'visual'
+        });
+    }
+
+    const audio = getAudioRisk(result);
+    if (audio.available && audio.eventCount > 0 && audio.level) {
+        candidates.push({ level: audio.level, source: 'audio' });
+    }
+
+    if (combinedLevel) {
+        const flagged = arrayValue(result.flaggedModalities)
+            ?.filter((modality) => ANALYSIS_MODALITIES.includes(modality)) ?? [];
+        let source = 'combined';
+
+        if (flagged.length === 1) source = flagged[0];
+        else if (flagged.length > 1) source = 'multiple';
+        else if (candidates.length === 1) source = candidates[0].source;
+        else if (candidates.length > 1) source = 'multiple';
+
+        return { level: combinedLevel, source };
     }
 
     if (candidates.length === 0) return { level: null, source: null };
 
-    const level = candidates.reduce((highest, candidate) =>
-        RISK_RANK[candidate] > RISK_RANK[highest] ? candidate : highest
+    const highest = candidates.reduce((current, candidate) =>
+        RISK_RANK[candidate.level] > RISK_RANK[current.level] ? candidate : current
     );
 
     return {
-        level,
-        source: textLevel === level ? 'text' : 'visual'
+        level: highest.level,
+        source: candidates.length > 1 ? 'multiple' : highest.source
     };
 }
 
@@ -133,7 +181,7 @@ export function getPartialAnalysisMessage(result = {}) {
     }
 
     if (unavailable.length === ANALYSIS_MODALITIES.length) {
-        return 'Text and visual analysis are unavailable. Human review is required.';
+        return 'Text, visual, and audio analysis are unavailable. Human review is required.';
     }
 
     const missing = MODALITY_LABELS[unavailable[0]];
@@ -147,6 +195,17 @@ export function getPartialAnalysisMessage(result = {}) {
 
 export function getModalityStatus(result = {}, modality) {
     result = result ?? {};
+    if (modality === 'audio') {
+        const analysis = result.audioAnalysis;
+        if (analysis?.status === 'completed') return { state: 'completed', label: 'Completed' };
+        if (analysis?.status === 'no_audio') return { state: 'not_applicable', label: 'No audio track' };
+        if (analysis?.status === 'failed') return { state: 'failed', label: 'Unavailable' };
+        if (arrayValue(result.modalitiesAnalyzed)?.includes('audio')) {
+            return { state: 'completed', label: 'Completed' };
+        }
+        return { state: 'unknown', label: 'Not evaluated' };
+    }
+
     const details = modality === 'text' ? result.textAnalysis : result.visualAnalysis;
     const status = details?.status;
 

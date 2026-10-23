@@ -90,6 +90,17 @@ const safeVision = [
   },
 ];
 
+const safeAudio = {
+  status: 'completed',
+  events: [],
+  riskLevel: 'safe',
+  riskScore: 0,
+  flaggedEventCount: 0,
+  model: 'test-yamnet',
+  scoreType: 'YAMNet class score (not calibrated)',
+  topClasses: [],
+};
+
 function textSignal(level = 'safe') {
   if (level === 'safe') {
     return {
@@ -131,6 +142,7 @@ function dependencies(database, overrides = {}) {
     database,
     transcribeVideo: async () => transcription,
     analyzeVideoFrames: async () => safeVision,
+    analyzeVideoAudio: async () => safeAudio,
     analyzeText: async () => textSignal(),
     resolveStored: () => 'stored/video.mp4',
     ...overrides,
@@ -153,8 +165,12 @@ test('both modalities complete preserves the successful analysis path', async t 
   assert.equal(state.resultUpdate.analyzer, ANALYZER_ID);
   assert.equal(state.resultUpdate.analysisStatus, 'completed');
   assert.equal(state.resultUpdate.partial, false);
-  assert.deepEqual(state.resultUpdate.modalitiesAnalyzed, ['text', 'visual']);
-  assert.deepEqual(state.resultUpdate.unavailableModalities, ['audio']);
+  assert.deepEqual(state.resultUpdate.modalitiesAnalyzed, [
+    'text',
+    'visual',
+    'audio',
+  ]);
+  assert.deepEqual(state.resultUpdate.unavailableModalities, []);
   assert.equal(state.resultUpdate.moderationDecision, 'allow');
   assert.equal(state.resultUpdate.transcript, safeTranscript.text);
   assert.equal(state.resultUpdate.textAnalysis.status, 'completed');
@@ -184,11 +200,11 @@ test('transcription failure still completes visual analysis as partial', async t
   assert.equal(state.resultUpdate.textAnalysis.status, 'failed');
   assert.equal(state.resultUpdate.textAnalysis.error, 'No audio stream');
   assert.equal(state.resultUpdate.visualAnalysis.status, 'completed');
-  assert.deepEqual(state.resultUpdate.modalitiesAnalyzed, ['visual']);
-  assert.deepEqual(state.resultUpdate.unavailableModalities, [
-    'text',
+  assert.deepEqual(state.resultUpdate.modalitiesAnalyzed, [
+    'visual',
     'audio',
   ]);
+  assert.deepEqual(state.resultUpdate.unavailableModalities, ['text']);
   assert.equal(state.resultUpdate.moderationDecision, 'review');
   assert.match(state.resultUpdate.decisionReason, /Text analysis is incomplete/);
   assert.equal(state.videoUpdate.status, 'needs_review');
@@ -216,11 +232,11 @@ test('vision failure preserves completed text analysis and events', async t => {
   assert.equal(state.resultUpdate.textAnalysis.status, 'completed');
   assert.equal(state.resultUpdate.visualAnalysis.status, 'failed');
   assert.equal(state.resultUpdate.transcript, transcription.text);
-  assert.deepEqual(state.resultUpdate.modalitiesAnalyzed, ['text']);
-  assert.deepEqual(state.resultUpdate.unavailableModalities, [
-    'visual',
+  assert.deepEqual(state.resultUpdate.modalitiesAnalyzed, [
+    'text',
     'audio',
   ]);
+  assert.deepEqual(state.resultUpdate.unavailableModalities, ['visual']);
   assert.equal(state.resultUpdate.moderationDecision, 'review');
   assert.match(
     state.resultUpdate.decisionReason,
@@ -231,7 +247,7 @@ test('vision failure preserves completed text analysis and events', async t => {
   assert.equal(state.videoUpdate.status, 'needs_review');
 });
 
-test('both modality failures mark the analysis and video as failed', async t => {
+test('text and vision failures preserve a successful audio result', async t => {
   t.mock.method(console, 'log', () => {});
   t.mock.method(console, 'error', () => {});
   const { database, state } = createFakeDatabase();
@@ -245,6 +261,45 @@ test('both modality failures mark the analysis and video as failed', async t => 
       },
       analyzeVideoFrames: async () => {
         throw new Error('Vision service unavailable');
+      },
+    }),
+  );
+
+  assert.equal(state.resultUpdate.status, 'completed');
+  assert.equal(state.resultUpdate.analysisStatus, 'partial');
+  assert.equal(state.resultUpdate.partial, true);
+  assert.deepEqual(state.resultUpdate.modalitiesAnalyzed, ['audio']);
+  assert.deepEqual(state.resultUpdate.unavailableModalities, [
+    'text',
+    'visual',
+  ]);
+  assert.match(state.resultUpdate.error, /No audio stream/);
+  assert.match(
+    state.resultUpdate.error,
+    /Visual analysis could not be completed/,
+  );
+  assert.equal(state.resultUpdate.moderationDecision, 'review');
+  assert.equal(state.videoUpdate.status, 'needs_review');
+  assert.equal(state.events.length, 0);
+});
+
+test('all modality failures mark the analysis and video as failed', async t => {
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'error', () => {});
+  const { database, state } = createFakeDatabase();
+
+  await runAnalysis(
+    videoId,
+    resultId,
+    dependencies(database, {
+      transcribeVideo: async () => {
+        throw new Error('No audio stream');
+      },
+      analyzeVideoFrames: async () => {
+        throw new Error('Vision service unavailable');
+      },
+      analyzeVideoAudio: async () => {
+        throw new Error('Audio event model unavailable');
       },
     }),
   );
@@ -263,6 +318,7 @@ test('both modality failures mark the analysis and video as failed', async t => 
     state.resultUpdate.error,
     /Visual analysis could not be completed/,
   );
+  assert.match(state.resultUpdate.error, /Audio event model unavailable/);
   assert.equal(state.videoUpdate.status, 'failed');
   assert.equal(state.events.length, 0);
 });

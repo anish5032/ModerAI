@@ -1,15 +1,29 @@
 import { config, MAX_CHUNKS } from "../config.js";
 import { getDb } from "../db.js";
 import { createId, now } from "../utils/common.js";
+import { analyzeVideoAudio } from "./audioEventService.js";
 import { predictText } from "./mlService.js";
 import { transcribeVideo } from "./transcriptionService.js";
 import { analyzeVideoFrames } from "./visionService.js";
 import { resolveStored } from "./videoService.js";
 
-export const ANALYZER_ID = "whisper-base+text-toxicity-v1";
+export const ANALYZER_ID =
+  "whisper-base+text-toxicity-v1+image-safety-xs+yamnet-v1";
 
 const labels = {
   text: "Speech / Transcript Toxicity",
+  audio: "Non-speech Audio Events",
+};
+
+const AUDIO_ACTIONABLE_SEVERITIES = new Set([
+  "moderate",
+  "high",
+  "critical",
+]);
+
+const VISION_SEVERITY = {
+  NSFL: "high",
+  NSFW: "moderate",
 };
 
 const categoryLabels = {
@@ -156,60 +170,103 @@ export function peakVideoRiskScore(chunkScores) {
 }
 
 
+function normalizedSeverity(level) {
+  return severityRank[level] !== undefined ? level : "safe";
+}
+
+function visualSeverityFor(analysis) {
+  if (
+    analysis?.status !== "completed" ||
+    Number(analysis.flaggedFrameCount) <= 0
+  ) {
+    return "safe";
+  }
+
+  return normalizedSeverity(analysis.riskLevel) === "safe"
+    ? "moderate"
+    : normalizedSeverity(analysis.riskLevel);
+}
+
+function audioSeverityFor(analysis) {
+  if (analysis?.status !== "completed") return "safe";
+
+  const level = normalizedSeverity(
+    analysis.actionableRiskLevel ?? analysis.riskLevel,
+  );
+
+  if (level === "safe") return "safe";
+  if (AUDIO_ACTIONABLE_SEVERITIES.has(level)) return level;
+
+  return Number(analysis.flaggedEventCount) > 0 ? "moderate" : "safe";
+}
+
 export function combineModerationRisk({
   textSeverity,
   visualAnalysis,
   textAnalysis,
+  audioAnalysis,
+  audioSeverity,
 }) {
-  const rank = {
-    safe: 0,
-    low: 1,
-    moderate: 2,
-    high: 3,
-    critical: 4,
-  };
-
-  let combinedSeverity =
-    rank[textSeverity] !== undefined ? textSeverity : "safe";
-
   const textCompleted = !textAnalysis || textAnalysis.status === "completed";
   const visualCompleted = visualAnalysis?.status === "completed";
+  const audioFailed = audioAnalysis?.status === "failed";
+  const audioCompleted = audioAnalysis?.status === "completed";
+  const textLevel = normalizedSeverity(textSeverity);
+  const visualLevel = visualSeverityFor(visualAnalysis);
+  const resolvedAudioLevel =
+    audioSeverity !== undefined
+      ? normalizedSeverity(audioSeverity)
+      : audioSeverityFor(audioAnalysis);
 
-  const visualFlagged =
-    visualCompleted &&
-    Number(visualAnalysis.flaggedFrameCount) > 0;
-
-  // A visual flag requires human review.
-  if (visualFlagged && rank[combinedSeverity] < rank.moderate) {
-    combinedSeverity = "moderate";
+  let combinedSeverity = textLevel;
+  if (severityRank[visualLevel] > severityRank[combinedSeverity]) {
+    combinedSeverity = visualLevel;
+  }
+  if (severityRank[resolvedAudioLevel] > severityRank[combinedSeverity]) {
+    combinedSeverity = resolvedAudioLevel;
   }
 
-  // Do not allow content when either analysis is incomplete.
+  const incompleteModalities = [
+    ...(!textCompleted ? ["text"] : []),
+    ...(!visualCompleted ? ["visual"] : []),
+    ...(audioFailed ? ["audio"] : []),
+  ];
+  const flaggedModalities = [
+    ...(textLevel !== "safe" ? ["text"] : []),
+    ...(visualLevel !== "safe" ? ["visual"] : []),
+    ...(resolvedAudioLevel !== "safe" ? ["audio"] : []),
+  ];
+
   const decision =
-    !textCompleted || !visualCompleted || combinedSeverity !== "safe"
+    incompleteModalities.length > 0 || combinedSeverity !== "safe"
       ? "review"
       : "allow";
 
   let decisionReason;
 
-  if (!textCompleted && !visualCompleted) {
+  if (incompleteModalities.length === 3) {
     decisionReason =
-      "Text and visual analysis are incomplete or unavailable; human review required.";
-  } else if (!textCompleted) {
-    decisionReason =
-      "Text analysis is incomplete or unavailable; human review required.";
-  } else if (!visualCompleted) {
-    decisionReason =
-      "Visual analysis is incomplete or unavailable; human review required.";
-  } else if (visualFlagged && textSeverity === "safe") {
+      "Text, visual, and audio analysis are incomplete or unavailable; human review required.";
+  } else if (incompleteModalities.length === 2) {
+    const [first, second] = incompleteModalities;
+    decisionReason = `${first[0].toUpperCase()}${first.slice(1)} and ${second} analysis are incomplete or unavailable; human review required.`;
+  } else if (incompleteModalities.length === 1) {
+    const [modality] = incompleteModalities;
+    decisionReason = `${modality[0].toUpperCase()}${modality.slice(1)} analysis is incomplete or unavailable; human review required.`;
+  } else if (flaggedModalities.length > 1) {
+    decisionReason = `Text, visual, and/or audio signals triggered the current review policy (${flaggedModalities.join(", ")}). Human review required.`;
+  } else if (flaggedModalities[0] === "visual") {
     decisionReason =
       "Visual safety model flagged one or more sampled frames; human review required.";
-  } else if (combinedSeverity === "safe") {
+  } else if (flaggedModalities[0] === "audio") {
     decisionReason =
-      "No text or visual signal triggered the current review policy.";
-  } else {
+      "Non-speech audio events triggered the current review policy; human review required.";
+  } else if (flaggedModalities[0] === "text") {
     decisionReason =
       "Text toxicity assessment requires human review.";
+  } else {
+    decisionReason =
+      "No text, visual, or actionable audio signal triggered the current review policy.";
   }
 
   return {
@@ -218,6 +275,9 @@ export function combineModerationRisk({
     decision,
     decisionReason,
     automaticRestrictionEnabled: false,
+    flaggedModalities,
+    incompleteModalities,
+    audioCompleted,
   };
 }
 
@@ -378,11 +438,27 @@ function buildReason(chunkId, start, end, signal) {
   return `Transcript in chunk #${chunkId} (${window}) triggered a ${signal.level} text assessment. Strongest detected category: ${signal.topCategoryName} (${(signal.topCategoryScore * 100).toFixed(2)}%). Detected categories: ${signal.tags.join(", ")}. Human review is required.${shortWarning}`;
 }
 
+function audioEventReason(event) {
+  const window = `${timecode(event.startSeconds)} - ${timecode(event.endSeconds)}`;
+  return `YAMNet detected a possible ${event.label.toLowerCase()} in ${window} (${event.severity} severity, class score ${(Number(event.score) * 100).toFixed(2)}%). The score is not a calibrated probability and the sound may occur in speech, music, fiction, or recreation. Review the surrounding context; human review is required.`;
+}
+
+function highestAudioSeverity(audioEvents) {
+  return audioEvents.reduce(
+    (highest, event) =>
+      severityRank[event.severity] > severityRank[highest]
+        ? event.severity
+        : highest,
+    "safe",
+  );
+}
+
 export async function runAnalysis(videoId, resultId, dependencies = {}) {
   const {
     database: injectedDatabase,
     transcribeVideo: transcribe = transcribeVideo,
     analyzeVideoFrames: analyzeFrames = analyzeVideoFrames,
+    analyzeVideoAudio: analyzeAudio = analyzeVideoAudio,
     analyzeText: analyzeChunk = analyzeText,
     resolveStored: resolveVideoPath = resolveStored,
   } = dependencies;
@@ -456,8 +532,8 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
 
       const text = transcriptForChunk(transcription.segments, start, end);
 
-      // No speech means no text score.
-      // Visual and non-speech audio moderation are not implemented.
+      // No speech means no text score. Visual and audio-event analysis run
+      // independently of transcription.
       if (!text) {
         continue;
       }
@@ -500,9 +576,8 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
         }
       }
 
-      console.log("[ModerAI DEBUG]", {
+      console.log("[ModerAI TEXT]", {
         chunkId,
-        transcript: text,
         rawTopScore: signal.rawTopScore,
         detectedCategories: signal.tags,
         severity: signal.level,
@@ -577,6 +652,7 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
       }
 
       const visualEvents = [];
+      let visualSeverity = "safe";
       for (const [index, result] of visualResults.entries()) {
         if (!["NSFW", "NSFL", "SFW"].includes(result?.predictedClass)) {
           throw new Error("Vision service returned an unsupported class.");
@@ -609,6 +685,18 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
           throw new Error(
             "Vision service returned invalid prediction scores or timestamp.",
           );
+        }
+
+        const visionSeverity =
+          result.predictedClass === "NSFL"
+            ? VISION_SEVERITY.NSFL
+            : modelScore >= 0.8
+              ? "high"
+              : VISION_SEVERITY.NSFW;
+        if (
+          severityRank[visionSeverity] > severityRank[visualSeverity]
+        ) {
+          visualSeverity = visionSeverity;
         }
 
         const time = timecode(timestamp);
@@ -660,6 +748,7 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
         status: "completed",
         sampledFrameCount: visualResults.length,
         flaggedFrameCount: visualEvents.length,
+        riskLevel: visualSeverity,
         models: [...new Set(visualResults.map((result) => result.model))],
         scoreTypes: [
           ...new Set(visualResults.map((result) => result.scoreType)),
@@ -681,12 +770,144 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
       };
     }
 
-    const textAnalysisSucceeded = textAnalysis.status === "completed";
-    const isPartial = !(textAnalysisSucceeded && visualAnalysisSucceeded);
+    let audioAnalysis = {
+      status: "failed",
+      events: [],
+      flaggedEventCount: 0,
+      actionableEventCount: 0,
+      informationalEventCount: 0,
+      riskLevel: "safe",
+      actionableRiskLevel: "safe",
+      riskScore: 0,
+      model: null,
+      error: "Audio event analysis could not be completed.",
+    };
+    let audioSeverity = "safe";
 
-    if (!textAnalysisSucceeded && !visualAnalysisSucceeded) {
+    try {
+      const audioResult = await analyzeAudio(
+        resolveVideoPath(video.storagePath),
+      );
+
+      if (!audioResult || !Array.isArray(audioResult.events)) {
+        throw new Error("Audio event service returned no event list.");
+      }
+
+      const actionableEvents = audioResult.events.filter((event) =>
+        AUDIO_ACTIONABLE_SEVERITIES.has(event?.severity),
+      );
+      audioSeverity = highestAudioSeverity(actionableEvents);
+
+      audioAnalysis = {
+        ...audioResult,
+        status: audioResult.status === "no_audio" ? "no_audio" : "completed",
+        flaggedEventCount: actionableEvents.length,
+        actionableEventCount: actionableEvents.length,
+        informationalEventCount:
+          audioResult.events.length - actionableEvents.length,
+        actionableRiskLevel: audioSeverity,
+        error: null,
+      };
+
+      for (const event of actionableEvents) {
+        const start = Number(event.startSeconds);
+        const end = Number(event.endSeconds);
+        const score = Number(event.score);
+        const riskScore = Number(event.riskScore);
+
+        if (
+          !Number.isFinite(start) ||
+          !Number.isFinite(end) ||
+          !Number.isFinite(score) ||
+          !Number.isFinite(riskScore) ||
+          start < 0 ||
+          end < start
+        ) {
+          throw new Error("Audio event service returned invalid event data.");
+        }
+
+        const boundedStart = Math.min(start, duration);
+        const boundedEnd = Math.min(Math.max(end, boundedStart), duration);
+        const audioEvent = {
+          category: event.category,
+          label: event.label,
+          description: event.description,
+          severity: event.severity,
+          classes: Array.isArray(event.classes) ? event.classes : [],
+        };
+
+        events.push({
+          _id: createId(),
+          videoId,
+          ownerId: video.ownerId,
+          resultId,
+          chunkId: Math.min(
+            count,
+            Math.floor(boundedStart / config.chunkSeconds) + 1,
+          ),
+          startSeconds: boundedStart,
+          endSeconds: boundedEnd,
+          timecode: timecode(boundedStart),
+          modality: "audio",
+          threat: event.label,
+          score,
+          riskScore,
+          severity: event.severity,
+          category: event.category,
+          classes: audioEvent.classes,
+          model: event.model ?? audioResult.model,
+          scoreType: audioResult.scoreType,
+          action: "flag",
+          reason: audioEventReason({
+            ...event,
+            startSeconds: boundedStart,
+            endSeconds: boundedEnd,
+          }),
+          signals: [
+            {
+              modality: "audio",
+              label: labels.audio,
+              ...audioEvent,
+              riskScore,
+              model: event.model ?? audioResult.model,
+              scoreType: audioResult.scoreType,
+            },
+          ],
+          reviewed: false,
+          review: {
+            status: "pending",
+          },
+          createdAt: now(),
+        });
+      }
+    } catch (error) {
+      console.error("Audio event analysis failed:", error);
+      audioAnalysis = {
+        ...audioAnalysis,
+        status: "failed",
+        error: error.message || "Audio event analysis failed.",
+      };
+      audioSeverity = "safe";
+    }
+
+    const textAnalysisSucceeded = textAnalysis.status === "completed";
+    const audioAnalysisSucceeded = audioAnalysis.status === "completed";
+    const audioAnalysisFailed = audioAnalysis.status === "failed";
+    const isPartial = !(
+      textAnalysisSucceeded &&
+      visualAnalysisSucceeded &&
+      !audioAnalysisFailed
+    );
+    const anyAnalysisSucceeded =
+      textAnalysisSucceeded || visualAnalysisSucceeded || audioAnalysisSucceeded;
+
+    if (!anyAnalysisSucceeded) {
       const completedAt = now();
-      const errorMessage = [textAnalysis.error, visualAnalysis.error]
+      const errorMessage = [
+        textAnalysis.error,
+        visualAnalysis.error,
+        audioAnalysis.error,
+      ]
         .filter(Boolean)
         .join(" ");
 
@@ -700,6 +921,7 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
             error: errorMessage || "Analysis failed. Please try again.",
             textAnalysis,
             visualAnalysis,
+            audioAnalysis,
             modalitiesAnalyzed: [],
             unavailableModalities: ["text", "visual", "audio"],
             completedAt,
@@ -729,12 +951,37 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
       (event) => event.review.status === "pending",
     ).length;
 
-    const riskScore = peakVideoRiskScore(chunkScores);
+    textAnalysis.riskLevel = highestSeverity;
+    textAnalysis.riskScore = peakVideoRiskScore(chunkScores);
+
+    const modalityRiskScores = {
+      text: textAnalysis.riskScore,
+      visual: visualAnalysisSucceeded
+        ? peakVideoRiskScore(
+            events
+              .filter((event) => event.modality === "visual")
+              .map((event) => Number(event.score) || 0),
+          )
+        : 0,
+      audio: audioAnalysisSucceeded
+        ? peakVideoRiskScore(
+            audioAnalysis.events
+              .filter((event) =>
+                AUDIO_ACTIONABLE_SEVERITIES.has(event.severity),
+              )
+              .map((event) => Number(event.riskScore) || 0),
+          )
+        : 0,
+    };
+    const riskScore = peakVideoRiskScore(Object.values(modalityRiskScores));
     const combinedRisk = combineModerationRisk({
       textSeverity: highestSeverity,
       visualAnalysis,
       textAnalysis,
+      audioAnalysis,
+      audioSeverity,
     });
+    const combinedSeverity = combinedRisk.combinedRiskLevel;
     const completedAt = now();
     const unavailableModalities = [];
 
@@ -744,7 +991,9 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
     if (!visualAnalysisSucceeded) {
       unavailableModalities.push("visual");
     }
-    unavailableModalities.push("audio");
+    if (!audioAnalysisSucceeded) {
+      unavailableModalities.push("audio");
+    }
 
     await database.collection("moderation_results").updateOne(
       { _id: resultId },
@@ -753,12 +1002,24 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
           status: "completed",
           analysisStatus: isPartial ? "partial" : "completed",
           partial: isPartial,
-          riskLevel: highestSeverity,
+          error: isPartial
+            ? [
+                textAnalysis.error,
+                visualAnalysis.error,
+                audioAnalysis.error,
+              ]
+                .filter(Boolean)
+                .join(" ")
+            : null,
+          riskLevel: combinedSeverity,
           riskScore,
-          combinedRiskLevel: combinedRisk.combinedRiskLevel,
+          modalityRiskScores,
+          combinedRiskLevel: combinedSeverity,
           combinedRiskScore: combinedRisk.combinedRiskScore,
           moderationDecision: combinedRisk.decision,
           decisionReason: combinedRisk.decisionReason,
+          flaggedModalities: combinedRisk.flaggedModalities,
+          incompleteModalities: combinedRisk.incompleteModalities,
           automaticRestrictionEnabled: combinedRisk.automaticRestrictionEnabled,
           topCategory: strongestSignal?.topCategory ?? null,
           topCategoryName: strongestSignal?.topCategoryName ?? null,
@@ -769,9 +1030,11 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
           transcriptSegmentCount: textAnalysis.segmentCount,
           analyzer: ANALYZER_ID,
           textAnalysis,
+          audioAnalysis,
           modalitiesAnalyzed: [
             ...(textAnalysisSucceeded ? ["text"] : []),
             ...(visualAnalysisSucceeded ? ["visual"] : []),
+            ...(audioAnalysisSucceeded ? ["audio"] : []),
           ],
           unavailableModalities,
           visualAnalysis,
@@ -788,7 +1051,7 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
       {
         $set: {
           status: needsReview ? "needs_review" : "ready",
-          riskLevel: highestSeverity,
+          riskLevel: combinedSeverity,
           riskScore,
           error: null,
           updatedAt: completedAt,
@@ -805,8 +1068,13 @@ export async function runAnalysis(videoId, resultId, dependencies = {}) {
       ...visualAnalysis,
     });
 
+    console.log("[ModerAI AUDIO STATUS]", {
+      succeeded: audioAnalysisSucceeded,
+      ...audioAnalysis,
+    });
+
     console.log(
-      `Highest detected severity: ${highestSeverity}; peak chunk risk score: ${(riskScore * 100).toFixed(2)}%.`,
+      `Highest detected severity: ${combinedSeverity}; combined modality risk score: ${(riskScore * 100).toFixed(2)}%.`,
     );
   } catch (error) {
     console.error("Analysis failed:", error);

@@ -348,6 +348,132 @@ describe('BackendModeration selection flow', () => {
         expect(container.querySelector('[data-testid="visual-modality-status"]').textContent).toBe('Unavailable');
     });
 
+    it('shows actionable audio events and combined audio risk', async () => {
+        const container = await renderResult({
+            status: 'completed',
+            analysisStatus: 'completed',
+            partial: false,
+            riskLevel: 'safe',
+            riskScore: 0,
+            combinedRiskLevel: 'high',
+            moderationDecision: 'review',
+            decisionReason: 'Actionable non-speech audio events require review.',
+            chunkCount: 2,
+            flaggedCount: 1,
+            modalityRiskScores: { text: 0, visual: 0, audio: 0.64 },
+            modalitiesAnalyzed: ['text', 'visual', 'audio'],
+            unavailableModalities: [],
+            textAnalysis: { status: 'completed', segmentCount: 2 },
+            visualAnalysis: {
+                status: 'completed',
+                sampledFrameCount: 6,
+                flaggedFrameCount: 0,
+                models: ['image-safety'],
+                scoreTypes: ['model class score']
+            },
+            audioAnalysis: {
+                status: 'completed',
+                model: 'audiomagic/yamnet-onnx',
+                riskLevel: 'high',
+                actionableRiskLevel: 'high',
+                riskScore: 0.64,
+                actionableEventCount: 2,
+                informationalEventCount: 1,
+                flaggedEventCount: 2
+            },
+            events: []
+        });
+
+        const audioStatus = container.querySelector('[data-testid="audio-modality-status"]');
+        const combinedRisk = container.querySelector('[data-testid="combined-risk"]');
+
+        expect(audioStatus.textContent).toBe('Completed');
+        expect(container.textContent).toContain('Actionable events: 2');
+        expect(container.textContent).toContain('Informational only: 1');
+        expect(container.textContent).toContain('Peak audio risk score: 0.64');
+        expect(container.textContent).toContain('Model: audiomagic/yamnet-onnx');
+        expect(combinedRisk.textContent).toContain('high');
+        expect(container.textContent).toContain('Based on actionable non-speech audio events.');
+        expect(container.querySelector('[data-testid="partial-analysis"]')).toBeNull();
+    });
+
+    it('shows partial analysis when audio event detection fails', async () => {
+        const container = await renderResult({
+            status: 'completed',
+            analysisStatus: 'partial',
+            partial: true,
+            riskLevel: 'safe',
+            riskScore: 0,
+            combinedRiskLevel: 'safe',
+            moderationDecision: 'review',
+            decisionReason: 'Audio analysis is incomplete; human review required.',
+            chunkCount: 2,
+            flaggedCount: 0,
+            modalitiesAnalyzed: ['text', 'visual'],
+            unavailableModalities: ['audio'],
+            textAnalysis: { status: 'completed', segmentCount: 2 },
+            visualAnalysis: {
+                status: 'completed',
+                sampledFrameCount: 6,
+                flaggedFrameCount: 0,
+                models: ['image-safety'],
+                scoreTypes: ['model class score']
+            },
+            audioAnalysis: {
+                status: 'failed',
+                error: 'Audio event model unavailable'
+            },
+            events: []
+        });
+
+        const partial = container.querySelector('[data-testid="partial-analysis"]');
+        const audioStatus = container.querySelector('[data-testid="audio-modality-status"]');
+
+        expect(audioStatus.textContent).toBe('Unavailable');
+        expect(partial.textContent).toContain('Audio analysis is unavailable');
+        expect(partial.textContent).toContain('text and visual analysis only');
+        expect(container.textContent).toContain('Audio event model unavailable');
+        expect(container.textContent).toContain('Human review required');
+    });
+
+    it('shows no-audio as not applicable without marking analysis partial', async () => {
+        const container = await renderResult({
+            status: 'completed',
+            analysisStatus: 'completed',
+            partial: false,
+            riskLevel: 'safe',
+            riskScore: 0,
+            combinedRiskLevel: 'safe',
+            moderationDecision: 'allow',
+            chunkCount: 2,
+            flaggedCount: 0,
+            modalitiesAnalyzed: ['text', 'visual'],
+            unavailableModalities: ['audio'],
+            textAnalysis: { status: 'completed', segmentCount: 2 },
+            visualAnalysis: {
+                status: 'completed',
+                sampledFrameCount: 6,
+                flaggedFrameCount: 0,
+                models: ['image-safety'],
+                scoreTypes: ['model class score']
+            },
+            audioAnalysis: {
+                status: 'no_audio',
+                events: [],
+                riskLevel: 'safe',
+                riskScore: 0
+            },
+            events: []
+        });
+
+        const audioStatus = container.querySelector('[data-testid="audio-modality-status"]');
+
+        expect(audioStatus.textContent).toBe('No audio track');
+        expect(container.querySelector('[data-testid="combined-risk"]').textContent).toContain('safe');
+        expect(container.querySelector('[data-testid="partial-analysis"]')).toBeNull();
+        expect(container.textContent).not.toContain('Audio analysis is unavailable');
+    });
+
     it('renders results with missing modality fields without crashing', async () => {
         const container = await renderResult({
             status: 'completed',
